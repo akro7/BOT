@@ -1,12 +1,14 @@
 """
 handlers/messages.py — معالج الرسائل النصية والملفات
 """
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Document
@@ -23,8 +25,18 @@ from bot.handlers.commands import forward_to_owner
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# ─── امتدادات مدعومة ──────────────────────────────────────────
+CODE_EXTS  = {"py", "js", "java", "cpp", "sh", "c", "ts", "go", "rs", "php", "rb", "kt", "swift"}
+TEXT_EXTS  = {"txt", "md", "log", "csv", "ini", "cfg", "env"}
+DATA_EXTS  = {"json", "xml", "yaml", "yml", "toml"}
+IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
+EXEC_MAP   = {"py": "py", "js": "js", "java": "java", "cpp": "cpp",
+               "sh": "bash", "c": "cpp", "ts": "js"}
 
-# ─── رسائل نصية ──────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════
+# رسائل نصية
+# ═══════════════════════════════════════════════════════════════
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_banned(user.id):
@@ -35,7 +47,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     mode = ctx.user_data.get("mode", "")
 
-    # ── رسالة مباشرة بدون وضع → محادثة ذكية ─────────────────
     if not mode:
         ctx.user_data["mode"] = "chat"
         mode = "chat"
@@ -272,6 +283,28 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ فشل إنشاء الرابط. حاول مرة أخرى.", reply_markup=back_keyboard())
         ctx.user_data.clear()
 
+    # ── 🗜️ مشروع ZIP ─────────────────────────────────────────
+    elif mode == "tool_zip":
+        msg = await update.message.reply_text("🗜️ جاري بناء المشروع وتجهيز الـ ZIP...")
+        inc_ai(uid)
+        zip_buf, project_name, summary = await _build_zip_project(text)
+        if zip_buf is None:
+            await msg.edit_text(f"❌ فشل في توليد المشروع:\n{summary}", reply_markup=back_keyboard())
+            ctx.user_data.clear()
+            return
+        await msg.edit_text(
+            f"✅ *تم بناء المشروع بنجاح!*\n\n📁 اسم المشروع: `{project_name}`\n\n{summary}",
+            parse_mode="Markdown"
+        )
+        await update.message.reply_document(
+            document=zip_buf,
+            filename=f"{project_name}.zip",
+            caption=f"🗜️ *{project_name}.zip* — جاهز للتحميل!",
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text("🔁 اختر:", reply_markup=main_keyboard())
+        ctx.user_data.clear()
+
     # ── استضافة — استقبال الكود ──────────────────────────────
     elif mode == "host_step1":
         tl = text.lower()
@@ -310,7 +343,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"❌ خطأ: {e}")
 
 
-# ─── معالج الملفات ───────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# معالج الملفات — موسّع
+# ═══════════════════════════════════════════════════════════════
 async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_banned(user.id):
@@ -320,43 +355,298 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     doc: Document = update.message.document
     if not doc:
         return
-    fname    = doc.file_name or ""
-    ext      = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
-    lang_map = {"py": "py", "js": "js", "java": "java", "cpp": "cpp", "sh": "bash", "c": "cpp"}
-    lang     = lang_map.get(ext)
 
-    if not lang:
-        await update.message.reply_text(
-            "📎 أنواع الملفات المدعومة: `.py` `.js` `.java` `.cpp` `.sh`",
-            parse_mode="Markdown"
+    fname = doc.file_name or "file"
+    ext   = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+    uid   = user.id
+
+    # ── ملفات الكود → تنفيذ ──────────────────────────────────
+    if ext in CODE_EXTS:
+        lang = EXEC_MAP.get(ext, "py")
+        msg  = await update.message.reply_text(
+            f"📥 جاري تنزيل وتنفيذ `{fname}`...", parse_mode="Markdown"
         )
-        return
-
-    msg = await update.message.reply_text(f"📥 جاري تنزيل وتنفيذ `{fname}`...", parse_mode="Markdown")
-    try:
-        file = await doc.get_file()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-            await file.download_to_drive(tmp.name)
-            with open(tmp.name, "r", encoding="utf-8", errors="replace") as f:
-                code = f.read()
-            os.unlink(tmp.name)
-        inc_exec(user.id)
-        save_project(user.id, code[:3000], lang)
-        output = await run_code(lang, code)
         try:
+            code = await _download_text(doc)
+            inc_exec(uid)
+            save_project(uid, code[:3000], lang)
+            output = await run_code(lang, code)
+            try:
+                await msg.edit_text(
+                    f"📤 *نتيجة تنفيذ `{fname}`:*\n```\n{output}\n```",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                await msg.edit_text(f"📤 نتيجة:\n{output}")
+            if uid != OWNER_ID:
+                await forward_to_owner(ctx.bot, user, f"[أرسل ملف: {fname}]\n{code[:200]}")
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ في معالجة الملف: {e}")
+
+    # ── ملفات نصية → قراءة + تحليل ───────────────────────────
+    elif ext in TEXT_EXTS:
+        msg = await update.message.reply_text(f"📄 جاري قراءة `{fname}`...", parse_mode="Markdown")
+        try:
+            content = await _download_text(doc)
+            preview = content[:500]
+            inc_ai(uid)
+            analysis = ai_generate(
+                f"حلّل هذا الملف النصي بالعربية وقدّم:\n"
+                f"1. ملخص المحتوى\n2. الأفكار الرئيسية\n3. أي ملاحظات مهمة\n\n"
+                f"محتوى الملف:\n{content[:3000]}"
+            )
             await msg.edit_text(
-                f"📤 *نتيجة تنفيذ `{fname}`:*\n```\n{output}\n```",
+                f"📄 *تحليل `{fname}`:*\n\n{analysis[:3500]}",
                 parse_mode="Markdown"
             )
-        except Exception:
-            await msg.edit_text(f"📤 نتيجة:\n{output}")
-        if user.id != OWNER_ID:
-            await forward_to_owner(ctx.bot, user, f"[أرسل ملف: {fname}]\n{code[:200]}")
-    except Exception as e:
-        await msg.edit_text(f"❌ خطأ في معالجة الملف: {e}")
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ: {e}")
+        await update.message.reply_text("🔁 اختر:", reply_markup=main_keyboard())
+
+    # ── ملفات البيانات → تحليل هيكلي ─────────────────────────
+    elif ext in DATA_EXTS:
+        msg = await update.message.reply_text(f"🔄 جاري تحليل `{fname}`...", parse_mode="Markdown")
+        try:
+            content = await _download_text(doc)
+            if ext == "json":
+                try:
+                    parsed   = json.loads(content)
+                    if isinstance(parsed, list):
+                        structure = f"مصفوفة بـ {len(parsed)} عنصر"
+                    elif isinstance(parsed, dict):
+                        structure = f"كائن بـ {len(parsed)} مفتاح: {', '.join(list(parsed.keys())[:10])}"
+                    else:
+                        structure = str(type(parsed).__name__)
+                    preview_str = json.dumps(parsed, ensure_ascii=False, indent=2)[:800]
+                except Exception:
+                    structure   = "JSON غير صالح"
+                    preview_str = content[:800]
+                info = f"📊 الهيكل: {structure}\n\n```json\n{preview_str}\n```"
+            else:
+                info = f"```\n{content[:1000]}\n```"
+
+            inc_ai(uid)
+            summary = ai_generate(
+                f"حلّل هذا الملف ({ext.upper()}) بالعربية:\n"
+                f"1. ما وظيفته؟\n2. ما البيانات المخزّنة؟\n3. أي ملاحظات؟\n\nالمحتوى:\n{content[:2000]}"
+            )
+            try:
+                await msg.edit_text(
+                    f"🔄 *تحليل `{fname}`:*\n\n{info}\n\n📋 *الملخص:*\n{summary[:1500]}",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                await msg.edit_text(f"تحليل:\n{summary[:3000]}")
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ: {e}")
+        await update.message.reply_text("🔁 اختر:", reply_markup=main_keyboard())
+
+    # ── ملفات ZIP → قائمة المحتوى + تحليل ───────────────────
+    elif ext == "zip":
+        msg = await update.message.reply_text(f"🗜️ جاري فحص `{fname}`...", parse_mode="Markdown")
+        try:
+            raw = await _download_bytes(doc)
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                names    = zf.namelist()
+                total    = len(names)
+                listing  = "\n".join(f"• `{n}`" for n in names[:30])
+                if total > 30:
+                    listing += f"\n_... و{total - 30} ملف آخر_"
+
+                # قراءة الملفات النصية الصغيرة للتحليل
+                text_samples = []
+                for n in names[:10]:
+                    if any(n.endswith(e) for e in [".py",".js",".ts",".java",".md",".txt",".json",".sh"]):
+                        try:
+                            data = zf.read(n)
+                            if len(data) < 5000:
+                                text_samples.append(f"--- {n} ---\n{data.decode('utf-8', errors='replace')[:500]}")
+                        except Exception:
+                            pass
+
+            inc_ai(uid)
+            context = "\n\n".join(text_samples[:3]) if text_samples else "لا توجد ملفات نصية مقروءة"
+            analysis = ai_generate(
+                f"حلّل هذا الـ ZIP ({total} ملف) بالعربية:\n"
+                f"1. ما نوع المشروع؟\n2. ما اللغات المستخدمة؟\n3. ما الهيكل العام؟\n\n"
+                f"قائمة الملفات:\n{chr(10).join(names[:30])}\n\nعينة من المحتوى:\n{context[:1500]}"
+            )
+            await msg.edit_text(
+                f"🗜️ *فحص `{fname}`:*\n\n📦 *{total} ملف:*\n{listing}\n\n📋 *التحليل:*\n{analysis[:1500]}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ في فحص الـ ZIP: {e}")
+        await update.message.reply_text("🔁 اختر:", reply_markup=main_keyboard())
+
+    # ── ملفات PDF → استخراج نص + تحليل ──────────────────────
+    elif ext == "pdf":
+        msg = await update.message.reply_text(f"📕 جاري قراءة `{fname}`...", parse_mode="Markdown")
+        try:
+            raw     = await _download_bytes(doc)
+            pdf_text = _extract_pdf_text(raw)
+            if not pdf_text.strip():
+                pdf_text = "لم يتم العثور على نص قابل للقراءة (قد يكون PDF صور)."
+            inc_ai(uid)
+            summary = ai_generate(
+                f"حلّل هذا PDF بالعربية:\n"
+                f"1. ملخص المحتوى\n2. الموضوعات الرئيسية\n3. أهم المعلومات\n\n"
+                f"النص:\n{pdf_text[:3000]}"
+            )
+            await msg.edit_text(
+                f"📕 *تحليل `{fname}`:*\n\n{summary[:3500]}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ في قراءة PDF: {e}")
+        await update.message.reply_text("🔁 اختر:", reply_markup=main_keyboard())
+
+    # ── صور → معلومات + وصف ──────────────────────────────────
+    elif ext in IMAGE_EXTS:
+        msg = await update.message.reply_text(f"🖼️ جاري تحليل الصورة `{fname}`...", parse_mode="Markdown")
+        try:
+            raw  = await _download_bytes(doc)
+            info = _image_info(raw, fname)
+            inc_ai(uid)
+            desc = ai_generate(
+                f"المستخدم أرسل صورة باسم `{fname}` بالمعلومات التالية:\n{info}\n\n"
+                f"صف ما قد تحتوي عليه هذه الصورة بناءً على اسمها ومعلوماتها، "
+                f"واقترح ما يمكن فعله بها برمجياً (مثل: ضغط، تحويل صيغة، تحليل pixels، إلخ)"
+            )
+            await msg.edit_text(
+                f"🖼️ *معلومات الصورة:*\n{info}\n\n💡 *اقتراحات:*\n{desc[:2000]}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await msg.edit_text(f"❌ خطأ: {e}")
+        await update.message.reply_text("🔁 اختر:", reply_markup=main_keyboard())
+
+    # ── صيغة غير مدعومة ──────────────────────────────────────
+    else:
+        supported = (
+            "📎 *الصيغ المدعومة:*\n\n"
+            "💻 *كود:* `.py` `.js` `.java` `.cpp` `.ts` `.go` `.rs` `.php` `.rb` `.kt` `.sh`\n"
+            "📄 *نص:* `.txt` `.md` `.log` `.csv`\n"
+            "🔄 *بيانات:* `.json` `.xml` `.yaml` `.yml`\n"
+            "🗜️ *أرشيف:* `.zip`\n"
+            "📕 *مستندات:* `.pdf`\n"
+            "🖼️ *صور:* `.jpg` `.png` `.gif` `.webp`"
+        )
+        await update.message.reply_text(supported, parse_mode="Markdown", reply_markup=back_keyboard())
 
 
-# ─── helper ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# helpers
+# ═══════════════════════════════════════════════════════════════
+async def _download_text(doc: Document) -> str:
+    file = await doc.get_file()
+    buf  = io.BytesIO()
+    await file.download_to_memory(buf)
+    return buf.getvalue().decode("utf-8", errors="replace")
+
+
+async def _download_bytes(doc: Document) -> bytes:
+    file = await doc.get_file()
+    buf  = io.BytesIO()
+    await file.download_to_memory(buf)
+    return buf.getvalue()
+
+
+def _extract_pdf_text(raw: bytes) -> str:
+    try:
+        import fitz  # PyMuPDF
+        doc  = fitz.open(stream=raw, filetype="pdf")
+        text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+        return text
+    except ImportError:
+        pass
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(raw))
+        return "\n".join(p.extract_text() or "" for p in reader.pages)
+    except Exception:
+        pass
+    return ""
+
+
+def _image_info(raw: bytes, fname: str) -> str:
+    lines = [f"• الاسم: `{fname}`", f"• الحجم: `{len(raw) / 1024:.1f} KB`"]
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw))
+        lines.append(f"• الأبعاد: `{img.width}×{img.height}` بكسل")
+        lines.append(f"• الوضع: `{img.mode}`")
+        lines.append(f"• الصيغة: `{img.format}`")
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+async def _build_zip_project(description: str):
+    """
+    يطلب من AI توليد مشروع كامل → يعيد (BytesIO zip, project_name, summary)
+    """
+    prompt = (
+        "أنت مولّد مشاريع برمجية. المستخدم طلب:\n"
+        f"{description}\n\n"
+        "أجب بـ JSON فقط بهذا الشكل الدقيق (بدون أي نص خارج JSON):\n"
+        "{\n"
+        '  "project_name": "my_project",\n'
+        '  "summary": "وصف قصير للمشروع",\n'
+        '  "files": [\n'
+        '    {"path": "main.py", "content": "..."},\n'
+        '    {"path": "README.md", "content": "..."}\n'
+        "  ]\n"
+        "}\n\n"
+        "القواعد:\n"
+        "- project_name: حروف إنجليزية وشرطات فقط\n"
+        "- اكتب كوداً حقيقياً كاملاً قابلاً للتشغيل\n"
+        "- اشمل README.md دائماً\n"
+        "- اشمل requirements.txt إن كان Python\n"
+        "- لا تكتب أي شيء خارج الـ JSON\n"
+        "- لا تستخدم markdown backticks"
+    )
+
+    raw_resp = ai_generate(prompt)
+
+    # تنظيف الرد من أي markdown
+    cleaned = re.sub(r"```[a-z]*\n?", "", raw_resp).replace("```", "").strip()
+
+    # استخراج JSON أول كائن كامل
+    start = cleaned.find("{")
+    end   = cleaned.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None, None, f"الرد لم يكن JSON صحيحاً:\n{raw_resp[:500]}"
+
+    try:
+        data = json.loads(cleaned[start:end])
+    except json.JSONDecodeError as e:
+        return None, None, f"خطأ في تحليل JSON: {e}\n{cleaned[start:start+300]}"
+
+    project_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", data.get("project_name", "project"))
+    summary      = data.get("summary", "مشروع مولّد بواسطة AI")
+    files        = data.get("files", [])
+
+    if not files:
+        return None, None, "لم يتم توليد أي ملفات."
+
+    # بناء ZIP في الذاكرة
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            path    = f.get("path", "file.txt")
+            content = f.get("content", "")
+            zf.writestr(f"{project_name}/{path}", content)
+    zip_buf.seek(0)
+
+    # ملخص الملفات المُنشأة
+    file_list = "\n".join(f"  📄 `{f.get('path','?')}`" for f in files)
+    full_summary = f"{summary}\n\n*الملفات:*\n{file_list}"
+
+    return zip_buf, project_name, full_summary
+
+
 def _share_code(code: str):
     try:
         r = requests.post("https://paste.rs", data=code.encode("utf-8"), timeout=10)

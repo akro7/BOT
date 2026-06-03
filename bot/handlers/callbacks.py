@@ -277,6 +277,21 @@ async def tool_install_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def tool_zip_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data.clear(); ctx.user_data["mode"] = "tool_zip"
+    await q.edit_message_text(
+        "🗜️ *مشروع ZIP*\n\n"
+        "صف المشروع الذي تريده وسأبنيه لك وأرفعه ZIP جاهز للتحميل!\n\n"
+        "📌 *أمثلة:*\n"
+        "`بوت تيليجرام بسيط يرد على الرسائل بـ Python`\n"
+        "`موقع HTML+CSS+JS لمعرض صور`\n"
+        "`API Flask بيحسب العمليات الحسابية`\n"
+        "`سكريبت Bash لعمل backup للملفات`",
+        parse_mode="Markdown"
+    )
+
+
 # ─── باقي الأزرار ────────────────────────────────────────────
 async def chat_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
