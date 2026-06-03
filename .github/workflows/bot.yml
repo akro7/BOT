@@ -1,0 +1,29 @@
+name: karasven AI Bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Bot
+        env:
+          BOT_TOKEN:     ${{ secrets.BOT_TOKEN }}
+          OWNER_ID:      ${{ secrets.OWNER_ID }}
+          OWNER_USER:    ${{ secrets.OWNER_USER }}
+          VERCEL_TOKEN:  ${{ secrets.VERCEL_TOKEN }}
+          OPENCODE_KEYS: ${{ secrets.OPENCODE_KEYS }}
+        run: python -m bot.main
