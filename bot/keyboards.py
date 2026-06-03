@@ -61,6 +61,7 @@ def tools_keyboard():
          InlineKeyboardButton("🔄 JSON↔Python",    callback_data="tool_json")],
         [InlineKeyboardButton("🔍 كشف لغة الكود", callback_data="tool_detect"),
          InlineKeyboardButton("🔗 مشاركة كود",    callback_data="tool_share")],
-        [InlineKeyboardButton("📦 تثبيت مكتبة",   callback_data="tool_install")],
+        [InlineKeyboardButton("🗜️ مشروع ZIP",      callback_data="tool_zip"),
+         InlineKeyboardButton("📦 تثبيت مكتبة",   callback_data="tool_install")],
         [InlineKeyboardButton("🔙 رجوع",           callback_data="back")],
     ])

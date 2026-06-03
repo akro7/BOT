@@ -21,7 +21,7 @@ from bot.handlers.callbacks import (
     select_lang,
     generate_btn, ai_review_btn, ai_explain_btn, ai_convert_btn, ai_docs_btn,
     challenge_btn, challenge_sol_btn, learn_concept_btn, learn_quiz_btn, quiz_level,
-    tool_api_btn, tool_json_btn, tool_detect_btn, tool_share_btn, tool_install_btn,
+    tool_api_btn, tool_json_btn, tool_detect_btn, tool_share_btn, tool_install_btn, tool_zip_btn,
     host_btn, host_deploy_btn, chat_btn,
     leaderboard_btn, show_btn, stats_btn, how_btn, clear_btn,
 )
@@ -99,6 +99,7 @@ def main():
     app.add_handler(CallbackQueryHandler(tool_detect_btn,  pattern=r"^tool_detect$"))
     app.add_handler(CallbackQueryHandler(tool_share_btn,   pattern=r"^tool_share$"))
     app.add_handler(CallbackQueryHandler(tool_install_btn, pattern=r"^tool_install$"))
+    app.add_handler(CallbackQueryHandler(tool_zip_btn,     pattern=r"^tool_zip$"))
 
     # باقي الأزرار
     app.add_handler(CallbackQueryHandler(host_btn,         pattern=r"^host$"))
